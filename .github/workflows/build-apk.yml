@@ -1,9 +1,7 @@
-name: Build Islamic Prayer
+name: Build Islamic Prayer TEST APK
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main, master ]
 
 permissions:
   contents: read
@@ -40,24 +38,7 @@ jobs:
       - name: Remove generated sample tests
         run: rm -rf test
 
-      - name: Decode signing keystore
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/release.jks
-            cat > android/key.properties <<PROPS
-          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
-          keyPassword=${{ secrets.KEY_PASSWORD }}
-          keyAlias=${{ secrets.KEY_ALIAS }}
-          storeFile=release.jks
-          PROPS
-            echo "Release keystore decoded — AAB will be signed with the upload key."
-          else
-            echo "No KEYSTORE_BASE64 secret set — release AAB will fall back to debug signing (NOT suitable for Play Store)."
-          fi
-
-      - name: Configure Android SDK, signing, package and desugaring
+      - name: Configure Android SDK, package and desugaring
         shell: bash
         run: |
           set -euo pipefail
@@ -77,39 +58,6 @@ jobs:
               s = s.replace('compileOptions {', 'compileOptions {\n        isCoreLibraryDesugaringEnabled = true', 1)
           if 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")' not in s:
               s = s.rstrip() + '\n\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
-
-          if 'import java.io.FileInputStream' not in s:
-              s = 'import java.io.FileInputStream\nimport java.util.Properties\n\n' + s
-
-          signing_block = '''
-          val keystorePropertiesFile = rootProject.file("key.properties")
-          val keystoreProperties = Properties()
-          if (keystorePropertiesFile.exists()) {
-              keystoreProperties.load(FileInputStream(keystorePropertiesFile))
-          }
-
-          signingConfigs {
-              create("release") {
-                  keyAlias = keystoreProperties["keyAlias"] as String?
-                  keyPassword = keystoreProperties["keyPassword"] as String?
-                  storeFile = keystoreProperties["storeFile"]?.let { file(it as String) }
-                  storePassword = keystoreProperties["storePassword"] as String?
-              }
-          }
-          '''
-          if 'signingConfigs {' not in s:
-              s = s.replace('android {', 'android {\n' + signing_block, 1)
-
-          if Path('android/key.properties').exists():
-              new_s, n = re.subn(
-                  r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)',
-                  'signingConfig = signingConfigs.getByName("release")',
-                  s,
-                  count=1,
-              )
-              if n == 0:
-                  raise SystemExit('ERROR: could not point release build at the release signingConfig — check build.gradle.kts release buildType.')
-              s = new_s
 
           for pattern, label in [
               (r'compileSdk\s*=\s*36', 'compileSdk'),
@@ -202,9 +150,6 @@ jobs:
       - name: Analyze
         run: flutter analyze --no-fatal-infos
 
-      - name: Build release AAB
-        run: flutter build appbundle --release
-
       - name: Build debug APK
         run: flutter build apk --debug
 
@@ -213,12 +158,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          cp build/app/outputs/bundle/release/app-release.aab artifacts/Islamic-Prayer-release.aab
           cp build/app/outputs/flutter-apk/app-debug.apk artifacts/Islamic-Prayer-debug.apk
 
-      - name: Upload build artifacts
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Islamic-Prayer-builds
-          path: artifacts/*
+          name: Islamic-Prayer-debug-apk
+          path: artifacts/Islamic-Prayer-debug.apk
           if-no-files-found: error

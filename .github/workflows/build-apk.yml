@@ -30,14 +30,54 @@ jobs:
           flutter --version
           java -version
 
+      - name: Find and extract uploaded project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*.zip' -print -quit)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo 'ERROR: No project ZIP found in repository.'
+            exit 1
+          fi
+          echo "Using ZIP: $ZIP_FILE"
+          rm -rf extracted
+          mkdir -p extracted
+          unzip -q "$ZIP_FILE" -d extracted
+
+      - name: Locate Flutter project
+        shell: bash
+        run: |
+          set -euo pipefail
+          PUBSPEC="$(find extracted -type f -name pubspec.yaml -print -quit)"
+          if [ -z "$PUBSPEC" ]; then
+            echo 'ERROR: pubspec.yaml not found inside uploaded ZIP.'
+            exit 1
+          fi
+          PROJECT_DIR="$(dirname "$PUBSPEC")"
+          echo "Flutter project: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Verify project assets
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f pubspec.yaml
+          test -f lib/main.dart
+          test -f assets/audio/azan.mp3
+          test -f assets/icon/app_icon.png
+
       - name: Generate Android platform
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           flutter create . --platforms=android --project-name=islamic_prayer --org=com.webworldbd
 
       - name: Remove generated sample tests
+        working-directory: ${{ env.PROJECT_DIR }}
         run: rm -rf test
 
       - name: Configure Android SDK, package and desugaring
+        working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
@@ -70,6 +110,7 @@ jobs:
           PY
 
       - name: Configure manifest and Azan resource
+        working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
@@ -128,6 +169,7 @@ jobs:
           XML
 
       - name: Fix generated Kotlin package
+        working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
@@ -141,23 +183,29 @@ jobs:
           fi
 
       - name: Get dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
       - name: Generate launcher icons
+        working-directory: ${{ env.PROJECT_DIR }}
         run: dart run flutter_launcher_icons
 
       - name: Analyze
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter analyze --no-fatal-infos
 
       - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --debug
 
       - name: Collect artifacts
+        working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifacts
-          cp build/app/outputs/flutter-apk/app-debug.apk artifacts/Islamic-Prayer-debug.apk
+          test -f build/app/outputs/flutter-apk/app-debug.apk
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp build/app/outputs/flutter-apk/app-debug.apk "$GITHUB_WORKSPACE/artifacts/Islamic-Prayer-debug.apk"
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

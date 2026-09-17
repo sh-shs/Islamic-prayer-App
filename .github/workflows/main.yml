@@ -1,0 +1,224 @@
+name: Build Islamic Prayer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Check tool versions
+        run: |
+          flutter --version
+          java -version
+
+      - name: Generate Android platform
+        run: |
+          flutter create . --platforms=android --project-name=islamic_prayer --org=com.webworldbd
+
+      - name: Remove generated sample tests
+        run: rm -rf test
+
+      - name: Decode signing keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/release.jks
+            cat > android/key.properties <<PROPS
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          storeFile=release.jks
+          PROPS
+            echo "Release keystore decoded — AAB will be signed with the upload key."
+          else
+            echo "No KEYSTORE_BASE64 secret set — release AAB will fall back to debug signing (NOT suitable for Play Store)."
+          fi
+
+      - name: Configure Android SDK, signing, package and desugaring
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          p = Path('android/app/build.gradle.kts')
+          s = p.read_text()
+
+          s = re.sub(r'namespace\s*=\s*".*?"', 'namespace = "com.webworldbd.islamicprayer"', s, count=1)
+          s = re.sub(r'applicationId\s*=\s*".*?"', 'applicationId = "com.webworldbd.islamicprayer"', s, count=1)
+          s = re.sub(r'compileSdk\s*=.*', 'compileSdk = 36', s, count=1)
+          s = re.sub(r'targetSdk\s*=.*', 'targetSdk = 36', s, count=1)
+          s = re.sub(r'minSdk\s*=.*', 'minSdk = 21', s, count=1)
+
+          if 'isCoreLibraryDesugaringEnabled = true' not in s:
+              s = s.replace('compileOptions {', 'compileOptions {\n        isCoreLibraryDesugaringEnabled = true', 1)
+          if 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")' not in s:
+              s = s.rstrip() + '\n\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
+
+          if 'import java.io.FileInputStream' not in s:
+              s = 'import java.io.FileInputStream\nimport java.util.Properties\n\n' + s
+
+          signing_block = '''
+          val keystorePropertiesFile = rootProject.file("key.properties")
+          val keystoreProperties = Properties()
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+          }
+
+          signingConfigs {
+              create("release") {
+                  keyAlias = keystoreProperties["keyAlias"] as String?
+                  keyPassword = keystoreProperties["keyPassword"] as String?
+                  storeFile = keystoreProperties["storeFile"]?.let { file(it as String) }
+                  storePassword = keystoreProperties["storePassword"] as String?
+              }
+          }
+          '''
+          if 'signingConfigs {' not in s:
+              s = s.replace('android {', 'android {\n' + signing_block, 1)
+
+          if Path('android/key.properties').exists():
+              new_s, n = re.subn(
+                  r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)',
+                  'signingConfig = signingConfigs.getByName("release")',
+                  s,
+                  count=1,
+              )
+              if n == 0:
+                  raise SystemExit('ERROR: could not point release build at the release signingConfig — check build.gradle.kts release buildType.')
+              s = new_s
+
+          for pattern, label in [
+              (r'compileSdk\s*=\s*36', 'compileSdk'),
+              (r'targetSdk\s*=\s*36', 'targetSdk'),
+              (r'minSdk\s*=\s*21', 'minSdk'),
+          ]:
+              if not re.search(pattern, s):
+                  raise SystemExit(f'ERROR: failed to set {label} in build.gradle.kts')
+
+          p.write_text(s)
+          PY
+
+      - name: Configure manifest and Azan resource
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('android/app/src/main/AndroidManifest.xml')
+          s = p.read_text()
+          perms = [
+              'android.permission.ACCESS_COARSE_LOCATION',
+              'android.permission.ACCESS_FINE_LOCATION',
+              'android.permission.POST_NOTIFICATIONS',
+              'android.permission.SCHEDULE_EXACT_ALARM',
+              'android.permission.RECEIVE_BOOT_COMPLETED',
+              'android.permission.VIBRATE',
+          ]
+          marker = '<application'
+          additions = ''.join(f'    <uses-permission android:name="{x}" />\n' for x in perms if x not in s)
+          pos = s.find(marker)
+          if pos < 0:
+              raise SystemExit('application tag missing')
+          if additions:
+              s = s[:pos] + additions + s[pos:]
+          s = s.replace('android:label="islamic_prayer"', 'android:label="Islamic Prayer"')
+          p.write_text(s)
+          PY
+
+          mkdir -p android/app/src/main/res/raw
+          cp assets/audio/azan.mp3 android/app/src/main/res/raw/azan.mp3
+
+          python3 - <<'PY2'
+          from pathlib import Path
+          p = Path('android/app/src/main/AndroidManifest.xml')
+          s = p.read_text()
+          marker = '</application>'
+          receivers = "\n".join([
+              '    <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />',
+              '    <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">',
+              '        <intent-filter>',
+              '            <action android:name="android.intent.action.BOOT_COMPLETED"/>',
+              '            <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>',
+              '            <action android:name="android.intent.action.QUICKBOOT_POWERON" />',
+              '            <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>',
+              '        </intent-filter>',
+              '    </receiver>',
+          ]) + "\n"
+          if 'ScheduledNotificationReceiver' not in s:
+              s = s.replace(marker, receivers + marker)
+          p.write_text(s)
+          PY2
+
+          mkdir -p android/app/src/main/res/values
+          cat > android/app/src/main/res/values/keep.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources xmlns:tools="http://schemas.android.com/tools"
+              tools:keep="@raw/azan" />
+          XML
+
+      - name: Fix generated Kotlin package
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAIN=$(find android/app/src/main/kotlin -name MainActivity.kt -print -quit || true)
+          if [ -n "$MAIN" ]; then
+            sed -i 's/package com\.webworldbd\.islamic_prayer/package com.webworldbd.islamicprayer/' "$MAIN"
+            mkdir -p android/app/src/main/kotlin/com/webworldbd/islamicprayer
+            if [ "$MAIN" != 'android/app/src/main/kotlin/com/webworldbd/islamicprayer/MainActivity.kt' ]; then
+              mv "$MAIN" android/app/src/main/kotlin/com/webworldbd/islamicprayer/MainActivity.kt
+            fi
+          fi
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Generate launcher icons
+        run: dart run flutter_launcher_icons
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos
+
+      - name: Build release AAB
+        run: flutter build appbundle --release
+
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp build/app/outputs/bundle/release/app-release.aab artifacts/Islamic-Prayer-release.aab
+          cp build/app/outputs/flutter-apk/app-debug.apk artifacts/Islamic-Prayer-debug.apk
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Islamic-Prayer-builds
+          path: artifacts/*
+          if-no-files-found: error
